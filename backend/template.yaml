@@ -1,0 +1,204 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Portfolio CMS — Lambda(FastAPI) + HTTP API + DynamoDB + S3(images) backend,
+  and S3 + CloudFront frontend hosting. Single-password login. Serverless: ~$0 when idle.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: portfolio-cms
+    Description: 리소스 접두사 (DynamoDB 테이블 / S3 버킷 이름에 사용)
+  AdminPassword:
+    Type: String
+    NoEcho: true
+    Description: 글쓰기 로그인 비밀번호 (강하게 설정). 이 비번에서 JWT 서명키가 파생됨
+  FrontendOrigin:
+    Type: String
+    Default: "http://localhost:5173"
+    Description: (선택) 커스텀 도메인. 예) https://yourdomain.com — 비우면 CloudFront 도메인만 사용
+  AssetBaseUrl:
+    Type: String
+    Default: ""
+    Description: 업로드 이미지 공개 base URL (CloudFront 도메인). 비우면 S3 URL 사용
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: python3.12
+
+Resources:
+  # ----------------------------- DynamoDB -----------------------------
+  BlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref ProjectName
+      BillingMode: PAY_PER_REQUEST   # on-demand: 쓴 만큼만 과금
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # --------------------------- 이미지 업로드 버킷 ---------------------------
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-assets-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT]
+            AllowedOrigins:
+              - "http://localhost:5173"
+              - !Ref FrontendOrigin
+              - !Sub "https://${CloudFrontDistribution.DomainName}"
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  UploadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UploadBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadImages
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${UploadBucket.Arn}/*"
+
+  # --------------------------- 프론트 정적 호스팅 ---------------------------
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-web-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName} site"
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100   # 가장 저렴 (북미·유럽 엣지)
+        HttpVersion: http2
+        Origins:
+          - Id: website-s3
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: website-s3
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # AWS Managed: CachingOptimized
+        CustomErrorResponses:   # SPA 라우팅: 없는 경로는 index.html 로
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution.Id}"
+
+  # ------------------------------ Lambda + API ------------------------------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: app.main.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref BlogTable
+          UPLOAD_BUCKET: !Ref UploadBucket
+          ASSET_BASE_URL: !Ref AssetBaseUrl
+          ADMIN_PASSWORD: !Ref AdminPassword
+          CORS_ORIGINS: !Sub "http://localhost:5173,https://${CloudFrontDistribution.DomainName},${FrontendOrigin}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BlogTable
+        - S3CrudPolicy:
+            BucketName: !Sub "${ProjectName}-assets-${AWS::AccountId}"
+      Events:
+        Proxy:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        Root:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: ANY
+
+Outputs:
+  SiteUrl:
+    Description: 배포된 사이트 URL (CloudFront)
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+  ApiUrl:
+    Description: API 베이스 URL (프론트 VITE_API_BASE_URL)
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  WebsiteBucketName:
+    Description: 프론트 빌드 업로드 대상 S3 버킷
+    Value: !Ref WebsiteBucket
+  DistributionId:
+    Description: CloudFront 배포 ID (무효화에 사용)
+    Value: !Ref CloudFrontDistribution
+  UploadBucketName:
+    Value: !Ref UploadBucket
+  TableName:
+    Value: !Ref BlogTable

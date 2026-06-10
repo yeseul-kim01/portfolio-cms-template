@@ -1,0 +1,12 @@
+# 복사해서 samconfig.toml 로 만들고 값을 채우세요 (samconfig.toml 은 .gitignore — 비번 평문 주의)
+#   cp samconfig.toml.example samconfig.toml
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "portfolio-cms"
+region = "ap-northeast-2"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = false
+# AdminPassword: 관리자 로그인 비번(강하게). ProjectName: 리소스 접두사. FrontendOrigin: 배포 도메인.
+parameter_overrides = "AdminPassword=\"CHANGE_ME\" ProjectName=\"portfolio-cms\" FrontendOrigin=\"https://yourdomain.com\""
