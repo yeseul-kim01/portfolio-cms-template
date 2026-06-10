@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# local env
+.env
+
+# 배포 비공개 메모 (비밀번호 포함)
+배포정보.local.md
+*.local.md
+
+# 배포 시크릿/설정
+backend/samconfig.toml
+deploy.env
+backend/.ddb-data
+
+# build artifacts
+*.tsbuildinfo
+scripts/*.mjs
+src/**/*.js
+src/**/*.jsx
+!scripts/setup.mjs
